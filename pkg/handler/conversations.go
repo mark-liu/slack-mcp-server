@@ -2092,6 +2092,17 @@ func isSlackUserIDPrefix(s string) bool {
 func (ch *ConversationsHandler) paramFormatUser(ctx context.Context, raw string) (string, error) {
 	users := ch.apiProvider.ProvideUsersMap()
 	raw = strings.TrimSpace(raw)
+	// "me" resolves to the authenticated user. Slack accepts from:me in a search
+	// query but the structured filter params want an ID, so callers that pass
+	// "me" here would otherwise 404. Resolve it via the token's own identity
+	// rather than a hardcoded ID so it stays correct across workspaces.
+	if strings.EqualFold(raw, "me") {
+		ar, err := ch.apiProvider.Slack().AuthTestContext(ctx)
+		if err != nil {
+			return "", fmt.Errorf("resolve %q via auth.test: %w", raw, err)
+		}
+		return fmt.Sprintf("<@%s>", ar.UserID), nil
+	}
 	if isSlackUserIDPrefix(raw) {
 		u, ok := users.Users[raw]
 		if !ok {
@@ -2113,6 +2124,19 @@ func (ch *ConversationsHandler) paramFormatUser(ctx context.Context, raw string)
 		raw = raw[1:]
 	}
 	uid, ok := users.UsersInv[raw]
+	if !ok {
+		// UsersInv is keyed on the exact username, so a real/display name like
+		// "Mark Liu" or a differently-cased handle 404s. Fall back to a
+		// case-insensitive scan across username, real name, and display name.
+		for _, u := range users.Users {
+			if strings.EqualFold(u.Name, raw) ||
+				strings.EqualFold(u.RealName, raw) ||
+				strings.EqualFold(u.Profile.DisplayName, raw) {
+				uid, ok = u.ID, true
+				break
+			}
+		}
+	}
 	if !ok {
 		return "", fmt.Errorf("user %q not found", raw)
 	}
